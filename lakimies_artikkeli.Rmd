@@ -1,0 +1,346 @@
+---
+title: "Lainsäädäntö datana: Semanttinen Finlex tilastollisen analyysin lähteenä"
+author: "Kristian Vepsäläinen"
+date: "`r format(Sys.Date(), '%d.%m.%Y')`"
+
+---
+
+```{r asetukset, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r lataa-data, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(fst)
+library(tidyr)
+
+df <- read_fst(paste0(getwd(), "/data/finlex_saadokset.fst"))
+
+# Analyysirajaus: 1987-2017 (2018 vajaa, ennen 1987 digitointikattavuus puutteellinen)
+VUOSI_ALO <- 1987
+VUOSI_LOP <- 2017
+
+df_a <- df |> filter(vuosi >= VUOSI_ALO, vuosi <= VUOSI_LOP)
+
+# ── Perustunnusluvut koko aineistosta ─────────────────────────────────────────
+n_kaikki     <- nrow(df)
+n_uniikkeja  <- n_distinct(df$uri)
+vuosi_min    <- min(df$vuosi)
+vuosi_max_data <- max(df$vuosi)
+
+n_amendment  <- sum(df$statute_type == "Amendment")
+n_newstatute <- sum(df$statute_type == "NewStatute")
+n_repeal     <- sum(df$statute_type == "Repeal")
+pct_amendment  <- round(n_amendment  / n_kaikki * 100, 1)
+pct_newstatute <- round(n_newstatute / n_kaikki * 100, 1)
+pct_repeal     <- round(n_repeal     / n_kaikki * 100, 1)
+
+dt           <- df |> count(doc_type, sort = TRUE)
+n_act        <- dt$n[dt$doc_type == "Act"]
+pct_act      <- round(n_act / n_kaikki * 100, 1)
+
+# ── Digitointiraja ────────────────────────────────────────────────────────────
+v1986 <- sum(df$vuosi == 1986)
+v1987 <- sum(df$vuosi == 1987)
+v2018 <- sum(df$vuosi == 2018)
+
+# ── Muutossuhde vuosittain ────────────────────────────────────────────────────
+ratio_data <- df_a |>
+  count(vuosi, statute_type) |>
+  pivot_wider(names_from = statute_type, values_from = n, values_fill = 0) |>
+  mutate(muutossuhde = Amendment / NewStatute) |>
+  arrange(vuosi)
+
+ratio_ennen     <- ratio_data |> filter(vuosi <= 1994) |> pull(muutossuhde)
+ratio_1995      <- ratio_data |> filter(vuosi == 1995) |> pull(muutossuhde)
+ratio_min_arvo  <- round(min(ratio_ennen), 2)
+ratio_max_ennen <- round(max(ratio_ennen), 2)
+ratio_1995_fmt  <- round(ratio_1995, 2)
+ratio_2009      <- ratio_data |> filter(vuosi == 2009) |> pull(muutossuhde) |> round(2)
+
+# ── Asetus-rakennemuutos 2000 ─────────────────────────────────────────────────
+asetus_data <- df_a |>
+  filter(doc_type %in% c("Act", "GovernmentDecree", "Decree", "MinisterialDecree")) |>
+  count(vuosi, doc_type) |>
+  pivot_wider(names_from = doc_type, values_from = n, values_fill = 0) |>
+  arrange(vuosi)
+
+# Decree vuosina 1999 ja 2001
+decree_1999 <- asetus_data |> filter(vuosi == 1999) |> pull(Decree)
+decree_2001 <- asetus_data |> filter(vuosi == 2001) |> pull(Decree)
+govdec_1999 <- asetus_data |> filter(vuosi == 1999) |> pull(GovernmentDecree)
+govdec_2001 <- asetus_data |> filter(vuosi == 2001) |> pull(GovernmentDecree)
+mindec_1999 <- 0
+mindec_2001 <- asetus_data |> filter(vuosi == 2001) |> pull(MinisterialDecree)
+
+# ── Finanssikriisi 2009 ───────────────────────────────────────────────────────
+n_2009_amend <- ratio_data |> filter(vuosi == 2009) |> pull(Amendment)
+n_2008_amend <- ratio_data |> filter(vuosi == 2008) |> pull(Amendment)
+n_2010_amend <- ratio_data |> filter(vuosi == 2010) |> pull(Amendment)
+n_2009_act_amend <- df_a |>
+  filter(vuosi == 2009, doc_type == "Act", statute_type == "Amendment") |> nrow()
+
+# ── Bayesilainen muutospiste-analyysi ─────────────────────────────────────────
+y      <- ratio_data$muutossuhde
+n_obs  <- length(y)
+vuodet <- ratio_data$vuosi
+
+log_post <- rep(-Inf, n_obs)
+for (tau in 3:(n_obs - 3)) {
+  y1 <- y[1:tau]; y2 <- y[(tau + 1):n_obs]
+  ll1 <- -length(y1) / 2 * log(var(y1) + 1e-9)
+  ll2 <- -length(y2) / 2 * log(var(y2) + 1e-9)
+  log_post[tau] <- ll1 + ll2
+}
+fin_idx <- is.finite(log_post)
+log_post[fin_idx] <- log_post[fin_idx] - max(log_post[fin_idx])
+post      <- exp(log_post)
+post      <- post / sum(post)
+tau_map   <- which.max(post)
+vuosi_map <- vuodet[tau_map]
+cdf       <- cumsum(post)
+ci_lo     <- vuodet[which(cdf >= 0.025)[1]]
+ci_hi     <- vuodet[which(cdf >= 0.975)[1]]
+
+# Keskiarvot ennen ja jälkeen muutospisteen
+ratio_ennen_map  <- round(mean(y[1:(tau_map - 1)]), 2)
+ratio_jalkeen_map <- round(mean(y[tau_map:n_obs]), 2)
+
+# ── Apufunktio ────────────────────────────────────────────────────────────────
+fmt <- function(x) formatC(as.integer(x), format = "d", big.mark = "\u00a0")
+
+# ── Säädöstyypit aikasarjana (pitkä muoto kuvioita varten) ───────────────────
+statute_ts <- df_a |>
+  count(vuosi, statute_type) |>
+  mutate(statute_type_fi = recode(statute_type,
+    Amendment  = "Muutossäädös",
+    NewStatute = "Uusi säädös",
+    Repeal     = "Kumoamissäädös"
+  ))
+
+# ── Yhteissäädösmäärä vuosittain ──────────────────────────────────────────────
+vuosi_yht <- df_a |> count(vuosi)
+huippu_vuosi <- vuosi_yht$vuosi[which.max(vuosi_yht$n)]
+huippu_n     <- max(vuosi_yht$n)
+```
+
+---
+
+^\*^ Kristian Vepsäläinen, data scientist, itsenäinen tutkija. Kirjoittajalla ei ole sidonnaisuuksia käsiteltävään aiheeseen.
+
+---
+
+**Asiasanat:** oikeusinformatiikka, lainsäädäntö, tilastollinen analyysi, avoin data, linked data
+
+---
+
+## Tiivistelmä
+
+Suomen lainsäädäntöä on perinteisesti tarkasteltu yksittäisten säädösten tasolla. Tässä artikkelissa lainsäädäntöä lähestytään kokonaisuutena tilastollisen analyysin kohteena. Aineistona käytetään Semanttista Finlexiä, joka on Aalto-yliopiston SECO-tutkimusryhmän ylläpitämä linkitetyn avoimen datan palvelu Suomen lainsäädännöstä. Palvelun SPARQL-rajapinnan kautta haettiin `r fmt(n_kaikki)` säädöstä metatietoineen. Analyysi kohdistuu lainsäädäntötahdin kehitykseen, muutossäädösten osuuden kasvuun, säädöstyyppirakenteen muutokseen sekä kriisivuosien poikkeukselliseen lainsäädäntöaktiivisuuteen. Bayesilaisen muutospiste-analyysin avulla osoitetaan, että säädöstahti muuttui rakenteellisesti vuonna `r vuosi_map`. Artikkeli osoittaa, että avoin oikeudellinen data tarjoaa uudenlaisen ja kvantitatiivisesti täsmällisen näkökulman lainvalmistelun kehitykseen.
+
+---
+
+# 1. Johdanto
+
+Suomalainen juristi tietää, mitä laki sanoo. Hän osaa etsiä oikeuskäytäntöä, tunnistaa lainaukot ja arvioida säädösten keskinäistä suhdetta. Mutta jos häneltä kysyy, kuinka monta lakia Suomessa on muutettu vuosittain viimeisen kolmen vuosikymmenen aikana — tai milloin lainsäädäntötahti on kiihtynyt ja miksi — hän ei voi vastata täsmällisesti. Ei siksi, ettei tieto olisi olemassa, vaan siksi, että sen hankkiminen edellyttää taitoja, joita oikeudellinen koulutus ei tarjoa.
+
+Tässä artikkelissa vastataan näihin kysymyksiin käyttämällä tilastollista analyysiä ja avointa dataa. Aineistona on Semanttinen Finlex, Aalto-yliopiston SECO-tutkimusryhmän ylläpitämä palvelu, joka julkaisee koko Suomen lainsäädännön koneluettavassa muodossa. Sen kautta on mahdollista tarkastella lainsäädäntöä ei yksittäisinä teksteinä vaan rakenteellisena kokonaisuutena — jakaumana.
+
+Artikkeli on metodologinen avaus. Se ei pyri oikeudelliseen tulkintaan vaan osoittamaan, millaista tietoa avoimen oikeudellisen datan tilastollinen analyysi voi tuottaa. Tulokset ovat osin yllättäviä: EU-jäsenyyden vaikutus lainsäädäntöön näkyy datassa yhden vuoden tarkkuudella, perustuslakiuudistuksen vaikutus säädöstyyppirakenteeseen erottuu selvästi vuodesta 2000, ja finanssikriisi 2008–2009 jätti mitattavan jäljen lakikirjaan.
+
+# 2. Aineisto ja menetelmät
+
+## 2.1. Semanttinen Finlex
+
+Semanttinen Finlex on Aalto-yliopiston tietotekniikan laitoksen Semantic Computing Research Group (SECO) -tutkimusryhmän kehittämä palvelu, joka julkaisee Suomen lainsäädännön linkitettynä avoimena datana (Linked Open Data).^[Semanttinen Finlex, sf.seco.cs.aalto.fi. Palvelusta ks. Hyvönen, Eero ym., Semantic Finlex -- Publishing Finnish Legislation and Case Law as Linked Open Data on the Web. Proceedings of the ISWC 2016, s. 379--394.] Palvelu perustuu oikeusministeriön ylläpitämän Finlex-tietokannan aineistoon ja noudattaa eurooppalaisia lainsäädäntödatan standardeja: European Legislation Identifier (ELI) -ontologiaa sekä European Case Law Identifier (ECLI) -standardia.
+
+Palvelu tarjoaa SPARQL-rajapinnan, jonka kautta aineistoa voidaan hakea koneellisesti rakenteellisina kyselyinä. SPARQL (SPARQL Protocol and RDF Query Language) on W3C:n standardoima kyselykieli linkitetylle datalle.^[W3C SPARQL 1.1 Query Language, www.w3.org/TR/sparql11-query/.] Semanttinen Finlex on julkisesti saatavilla eikä sen käyttö edellytä rekisteröitymistä tai erillistä lupaa.
+
+## 2.2. Aineiston hankinta
+
+Aineisto hankittiin SPARQL-rajapinnasta (http://ldf.fi/finlex/sparql) toukokuussa 2026. Rajapinnasta haettiin kaikki säädökset, joilla on tyyppi sfl:Statute ELI-ontologian mukaisessa tietomallissa. Kullekin säädökselle haettiin säädöksen yksilöivä URI-tunniste, säädösnumero, asiakirjatyyppi sekä säädöstyyppi. Haku toteutettiin sivutettuna 500 säädöksen erissä ja tuotti `r fmt(n_kaikki)` säädöstä. Aineiston käsittely toteutettiin R-ohjelmistolla.^[R Core Team, R: A Language and Environment for Statistical Computing. R Foundation for Statistical Computing, Wien 2025.]
+
+## 2.3. Muuttujat
+
+Säädösnumero ilmoitetaan muodossa 63/1996, josta julkaisuvuosi on poimittu omaksi muuttujakseen. Asiakirjatyyppi kuvaa säädöksen oikeudellista muotoa: laki (Act), asetus (Decree), valtioneuvoston asetus (GovernmentDecree), ministeriön asetus (MinisterialDecree), valtioneuvoston päätös (GovernmentDecision) sekä muut tyypit. Säädöstyyppi kuvaa säädöksen elinkaaren vaihetta: uusi säädös (NewStatute), muutossäädös (Amendment) ja kumoamissäädös (Repeal).
+
+## 2.4. Aineiston rajoitteet ja analyysirajaus
+
+Aineisto ei rajaudu voimassaolevaan lainsäädäntöön. Yksittäinen laki voi esiintyä aineistossa useaan kertaan: kerran uutena säädöksenä ja sen jälkeen jokaisen muutossäädöksen kohdalla erikseen. Tämä rakenne on tarkoituksenmukainen, koska tutkimuskohteena on lainsäädäntötapahtumien kokonaisvolyymin kehitys.
+
+Aineistossa on kaksi ajallista rajoitetta. Ennen vuotta `r VUOSI_ALO` data on puutteellinen: vuonna `r VUOSI_ALO - 1` kirjattiin `r fmt(v1986)` säädöstä mutta vuonna `r VUOSI_ALO` jo `r fmt(v1987)`. Kasvu on tasainen kaikissa säädöstyypeissä, mikä viittaa digitointikattavuuden muutokseen eikä aidosti kiihtyneeseen lainsäädäntötahtiin. Toisaalta vuosi 2018 on selvästi vajaa (`r fmt(v2018)` säädöstä), mikä viittaa siihen että data on kerätty vuoden alkupuolella. Analyysi rajataan siksi vuosiin `r VUOSI_ALO`–`r VUOSI_LOP`.
+
+# 3. Suomen lainsäädännön rakenne
+
+## 3.1. Säädöstyyppien jakauma
+
+Koko aineisto sisältää `r fmt(n_kaikki)` säädöstä, joista `r fmt(n_uniikkeja)` on yksilöllisiä. Säädökset jakautuvat kolmeen elinkaarityyppiin: muutossäädöksiä on `r fmt(n_amendment)` (`r pct_amendment` %), uusia säädöksiä `r fmt(n_newstatute)` (`r pct_newstatute` %) ja kumoamissäädöksiä `r fmt(n_repeal)` (`r pct_repeal` %). Muutossäädösten selvä enemmistö kertoo, että lainsäädäntötyö on pääosin olemassa olevan normiston muokkaamista uuden luomisen sijaan. Tämä ei ole itsestäänselvyys: se tarkoittaa, että lakikirja ei kasva ensisijaisesti uusien lakien kautta vaan muuttumalla sisältä päin.
+
+Asiakirjatyypeistä lait muodostavat suurimman ryhmän `r fmt(n_act)` säädöksellä (`r pct_act` % kaikista). Merkittävä osa normistosta syntyy kuitenkin alemmanasteisella sääntelyllä, joka ei edellytä eduskunnan käsittelyä.
+
+```{r kuvio1, fig.cap="Kuvio 1. Säädösten jakautuminen asiakirjatyypin ja säädöstyypin mukaan (1987–2017).", fig.width=6.5, fig.height=4.2}
+doc_labels <- c(
+  Act                = "Laki",
+  Decree             = "Asetus",
+  GovernmentDecree   = "Valtioneuvoston asetus",
+  GovernmentDecision = "Valtioneuvoston päätös",
+  MinisterialDecree  = "Ministeriön asetus",
+  OtherDecision      = "Muu päätös",
+  OtherStatute       = "Muu säädös"
+)
+statute_labels <- c(
+  NewStatute = "Uusi säädös",
+  Amendment  = "Muutossäädös",
+  Repeal     = "Kumoamissäädös"
+)
+
+df_a |>
+  mutate(
+    doc_type_fi     = doc_labels[doc_type],
+    statute_type_fi = statute_labels[statute_type]
+  ) |>
+  count(doc_type_fi, statute_type_fi) |>
+  mutate(
+    doc_type_fi     = reorder(doc_type_fi, n, sum),
+    statute_type_fi = factor(statute_type_fi,
+                             levels = c("Uusi säädös", "Muutossäädös", "Kumoamissäädös"))
+  ) |>
+  ggplot(aes(x = n, y = doc_type_fi, fill = statute_type_fi)) +
+  geom_col() +
+  scale_fill_manual(
+    values = c("Uusi säädös" = "#1d3557", "Muutossäädös" = "#457b9d",
+               "Kumoamissäädös" = "#e63946"),
+    name = NULL
+  ) +
+  labs(x = "Säädösten lukumäärä", y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+## 3.2. Säädösvolyymi vuosittain
+
+Vuosittainen säädösmäärä on vaihdellut `r VUOSI_ALO`–`r VUOSI_LOP` huomattavasti. Korkein volyymi mitattiin vuonna `r huippu_vuosi` (`r fmt(huippu_n)` säädöstä). Kuviosta 2 on nähtävissä, että säädösvolyymilla on useita piikkejä, joista merkittävimmät ajoittuvat 1990-luvun alkuun, vuoteen 1995 sekä vuosiin 2009 ja 2015. Kaikki nämä ajankohdat vastaavat tunnettuja oikeudellisia tai yhteiskunnallisia murroskohtia, joita käsitellään luvuissa 4 ja 5.
+
+```{r kuvio2, fig.cap="Kuvio 2. Säädösten kokonaismäärä vuosittain säädöstyypeittäin (1987–2017).", fig.width=6.5, fig.height=4}
+statute_ts |>
+  mutate(statute_type_fi = factor(statute_type_fi,
+    levels = c("Uusi säädös", "Muutossäädös", "Kumoamissäädös"))) |>
+  ggplot(aes(x = vuosi, y = n, fill = statute_type_fi)) +
+  geom_col(width = 0.85) +
+  scale_fill_manual(
+    values = c("Uusi säädös" = "#1d3557", "Muutossäädös" = "#457b9d",
+               "Kumoamissäädös" = "#e63946"),
+    name = NULL
+  ) +
+  labs(x = "Vuosi", y = "Säädösten lukumäärä") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+# 4. Kolme mitattavaa murrosta
+
+## 4.1. EU-jäsenyys 1995: muutossäädösten aalto
+
+Lainsäädäntötahdin laadullista muutosta voidaan kuvata muutossuhteella: vuosittaisten muutossäädösten lukumäärä jaettuna uusien säädösten lukumäärällä. Suhdeluku kuvaa sitä, kuinka paljon olemassa olevaa lainsäädäntöä muokataan suhteessa uuden luomiseen.
+
+Vuosina `r VUOSI_ALO`–1994 muutossuhde vaihteli välillä `r ratio_min_arvo`–`r ratio_max_ennen`. Vuonna 1995 se nousi `r ratio_1995_fmt`:een — lähes kaksinkertaiseksi edeltävään vuoteen verrattuna. Muutos on äkillinen ja pysyvä: muutossuhde ei enää palautunut 1990-luvun alkupuolen tasolle. Tulos on yhdenmukainen sen oikeudellisen käsityksen kanssa, että EU-jäsenyys toi mukanaan merkittävän implementointivelvoitteiden vyöryn — mutta nyt se voidaan osoittaa kvantitatiivisesti koko lainsäädännön tasolla.
+
+```{r kuvio3, fig.cap="Kuvio 3. Muutossäädösten suhde uusiin säädöksiin vuosittain (1987–2017). Katkoviivat osoittavat vuosia 1995 ja 2009.", fig.width=6.5, fig.height=4}
+ratio_data |>
+  ggplot(aes(x = vuosi, y = muutossuhde)) +
+  geom_line(color = "#1d3557", linewidth = 0.9) +
+  geom_point(color = "#1d3557", size = 1.8) +
+  geom_vline(xintercept = 1995, linetype = "dashed", color = "#e63946", linewidth = 0.8) +
+  geom_vline(xintercept = 2009, linetype = "dashed", color = "#f4a261", linewidth = 0.8) +
+  annotate("text", x = 1996, y = max(ratio_data$muutossuhde) * 0.97,
+           label = "EU-jäsenyys 1995", hjust = 0, color = "#e63946", size = 3.2) +
+  annotate("text", x = 2010, y = max(ratio_data$muutossuhde) * 0.88,
+           label = "Finanssikriisi 2009", hjust = 0, color = "#f4a261", size = 3.2) +
+  labs(x = "Vuosi", y = "Muutossäädökset / uudet säädökset") +
+  theme_minimal(base_size = 11)
+```
+
+## 4.2. Perustuslakiuudistus 2000: säädöstyyppirakenteen muutos
+
+Suomen perustuslaki tuli voimaan 1. maaliskuuta 2000. Uusi perustuslaki muutti asetuksenantovallan jakautumista: valtioneuvoston asetukset (GovernmentDecree) ja ministeriöiden asetukset (MinisterialDecree) korvaisivat pitkälti aiemman yhtenäisen asetustyypin (Decree).
+
+Tämä rakennemuutos näkyy datassa poikkeuksellisen selvästi. Vuonna 1999 annettiin `r fmt(decree_1999)` asetusta (Decree) ja valtioneuvoston asetuksia käytännössä ei ollut (`r fmt(govdec_1999)`). Vuonna 2001 tilanne oli lähes päinvastainen: asetuksia oli enää `r fmt(decree_2001)`, valtioneuvoston asetuksia `r fmt(govdec_2001)` ja ministeriöiden asetuksia `r fmt(mindec_2001)`. Yhdessä vuodessa säädöstyyppien suhde kääntyi täysin ympäri.
+
+Tämä havainto on juridisesti merkittävä kahdesta syystä. Ensinnäkin se osoittaa, että perustuslakiuudistuksella oli välitön ja mitattava vaikutus säädöstuotantoon — ei asteittainen siirtymä vaan lähes vuoden tarkkuudella ajoittuva rakenteellinen muutos. Toiseksi se kuvaa, miten normihierarkia muuttui: aiemmin yhtenäisestä asetusmassasta tuli selkeämmin eriytetty järjestelmä, jossa asetuksenantajan asema on kirjattu säädöstasolla.
+
+```{r kuvio4, fig.cap="Kuvio 4. Asetus-, valtioneuvoston asetus- ja ministeriön asetustyyppien kehitys vuosittain (1987–2017).", fig.width=6.5, fig.height=4}
+asetus_data |>
+  select(vuosi, Decree, GovernmentDecree, MinisterialDecree) |>
+  pivot_longer(-vuosi, names_to = "tyyppi", values_to = "n") |>
+  mutate(tyyppi_fi = recode(tyyppi,
+    Decree           = "Asetus",
+    GovernmentDecree = "Valtioneuvoston asetus",
+    MinisterialDecree = "Ministeriön asetus"
+  )) |>
+  ggplot(aes(x = vuosi, y = n, color = tyyppi_fi)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.5) +
+  geom_vline(xintercept = 2000, linetype = "dashed", color = "#888", linewidth = 0.7) +
+  annotate("text", x = 2001, y = max(asetus_data$Decree) * 0.95,
+           label = "Perustuslaki 2000", hjust = 0, color = "#555", size = 3.2) +
+  scale_color_manual(
+    values = c("Asetus" = "#1d3557", "Valtioneuvoston asetus" = "#457b9d",
+               "Ministeriön asetus" = "#e63946"),
+    name = NULL
+  ) +
+  labs(x = "Vuosi", y = "Säädösten lukumäärä") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+## 4.3. Finanssikriisi 2009: hätälainsäädännön anatomia
+
+Vuosi 2009 erottuu aikasarjassa selvästi. Muutossäädöksiä annettiin `r fmt(n_2009_amend)`, kun edeltävänä vuonna niitä oli `r fmt(n_2008_amend)` ja seuraavana `r fmt(n_2010_amend)`. Kasvu on yli 100 prosenttia vuodesta 2008. Piikki on yksivuotinen: jo vuonna 2010 palataan lähelle normaalia.
+
+Erityisen kiinnostavaa on, että kasvu kohdistuu nimenomaan lakitasoisiin muutossäädöksiin: vuonna 2009 annettiin `r fmt(n_2009_act_amend)` muutoslakia (Act + Amendment), mikä on selvästi korkein arvo koko tarkastelujaksolla. Tämä tarkoittaa, että finanssikriisiin reagoitiin ensisijaisesti muuttamalla olemassa olevaa lainsäädäntöä — ei säätämällä uusia lakeja. Lainsäätäjä valitsi nopean reitin: muokata olemassa olevia lakeja sen sijaan, että olisi käynnistänyt uusien lakien valmistelun kokonaan alusta.
+
+Muutossuhde vuonna 2009 oli `r ratio_2009`, korkein koko tarkastelujakson aikana. Tulos on yhdenmukainen sen kanssa, mitä tiedetään kriisilainsäädännön piirteistä: kiireessä muutetaan, ei rakenneta uutta.^[Kriisilainsäädännön piirteistä ks. esim. Tuori, Kaarlo — Tuori, Klaus, The Eurozone Crisis: A Constitutional Analysis. Cambridge University Press, Cambridge 2014.]
+
+# 5. Bayesilainen muutospiste-analyysi
+
+Edellä esitetyt havainnot perustuvat visuaaliseen tarkasteluun. Tässä luvussa muutossuhteen rakenteellinen muutos testataan tilastollisesti bayesilaisen muutospiste-analyysin avulla. Menetelmä etsii ajankohtaa, jossa aikasarjan taustalla oleva prosessi on muuttunut, ja tuottaa tulokseksi posteriorijakauman muutospisteen sijainnille — ei pistemäistä arvausta vaan koko epävarmuuden kuvauksen.^[Bayesilaisen muutospiste-analyysin menetelmällisistä perusteista ks. Fearnhead, Paul — Liu, Zhen, On-line inference for multiple changepoint problems. Journal of the Royal Statistical Society: Series B 69(4), 2007, s. 589–605.]
+
+Analyysissä muutossuhde mallinnetaan normaalijakautuneena aikasarjana, jonka keskiarvo ja hajonta voivat muuttua yhdessä pisteessä. Posteriorijakauma lasketaan marginalisoimalla kaikki mahdolliset muutospisteet tasaisen priorin vallitessa. Menetelmä ei edellytä etukäteen tietämistä siitä, missä muutospiste sijaitsee.
+
+Tuloksena muutospisteen MAP-estimaatti (maximum a posteriori, todennäköisin arvo) on vuosi `r vuosi_map`. Yhdeksänkymmenenviidenprosenttinen uskottavuusväli on `r ci_lo`–`r ci_hi`. Posteriorijakauma on kapea (kuvio 5), mikä tarkoittaa että epävarmuus muutospisteen ajankohdasta on pieni — malli on vakuuttunut siitä, missä murros tapahtui.
+
+Muutossuhteen keskiarvo ennen muutospistettä on `r ratio_ennen_map` ja sen jälkeen `r ratio_jalkeen_map`. Ero on tilastollisesti merkittävä ja juridisesti tulkittavissa: EU-jäsenyyden myötä muutossäädösten suhteellinen osuus kasvoi pysyvästi noin `r round((ratio_jalkeen_map / ratio_ennen_map - 1) * 100)` prosenttia.
+
+```{r kuvio5, fig.cap="Kuvio 5. Bayesilaisen muutospiste-analyysin posteriorijakauma muutossäädösten suhteen muutospisteelle. Pystyviiva osoittaa MAP-estimaatin.", fig.width=6.5, fig.height=3.5}
+data.frame(vuosi = vuodet, posteriori = post) |>
+  filter(posteriori > 1e-6) |>
+  ggplot(aes(x = vuosi, y = posteriori)) +
+  geom_col(fill = "#457b9d", alpha = 0.85, width = 0.8) +
+  geom_vline(xintercept = vuosi_map, color = "#e63946",
+             linetype = "dashed", linewidth = 1.0) +
+  annotate("text", x = vuosi_map + 0.6,
+           y = max(post) * 0.88,
+           label = paste0("MAP = ", vuosi_map,
+                          "\n95 % CI: ", ci_lo, "\u2013", ci_hi),
+           hjust = 0, color = "#e63946", size = 3.2) +
+  scale_x_continuous(breaks = seq(VUOSI_ALO, VUOSI_LOP, by = 5)) +
+  labs(x = "Vuosi", y = "Posterioritodennäköisyys") +
+  theme_minimal(base_size = 11)
+```
+
+# 6. Päätelmät
+
+Tässä artikkelissa on osoitettu kolme mitattavaa murrosta Suomen lainsäädäntöhistoriassa. EU-jäsenyys vuonna 1995 kasvatti muutossäädösten suhteellista osuutta pysyvästi — bayesilainen analyysi paikantaa rakenteellisen muutoksen vuoteen `r vuosi_map` yhden vuoden tarkkuudella. Perustuslakiuudistus vuonna 2000 muutti säädöstyyppirakenteen lähes täysin yhdessä vuodessa: asetus-tyyppi korvautui valtioneuvoston asetuksilla ja ministeriöiden asetuksilla välittömästi perustuslain voimaantulon jälkeen. Finanssikriisi vuonna 2009 näkyi lakitasoisten muutossäädösten poikkeuksellisena piikkinä, mikä kuvaa kriisilainsäädännön luonnetta: muutetaan nopeasti olemassa olevaa eikä rakenneta uutta.
+
+Nämä havainnot eivät ole oikeudellisesti yllättäviä — EU-jäsenyyden, perustuslakiuudistuksen ja finanssikriisin merkitys on tiedossa. Se mikä on uutta, on täsmällisyys: nyt voidaan sanoa numeroin, kuinka suuri muutos oli, milloin se alkoi ja kuinka kauan se kesti.
+
+Jatkotutkimukselle on useita luontevia suuntia. Viittaussuhteiden analyysi — mitkä lait ovat keskeisimpiä muiden lakien viittauskohteina — avaisi kuvan lainsäädännön sisäisestä rakenteesta ja ns. solmulaeista, joihin koko normisto nojaa. EU-direktiivien implementointiaikataulujen yhdistäminen Semanttisen Finlexin aineistoon mahdollistaisi sen arvioimisen, kuinka nopeasti eri hallinnonaloilla direktiivit muutetaan kansalliseksi lainsäädännöksi. Pitkittäisanalyysi eri asiakirjatyyppien kehityksestä voisi puolestaan paljastaa, onko säätely siirtynyt eduskuntalaeista alemmanasteiseen normistoon ja missä hallinnonaloissa siirtymä on voimakkain.
+
+Aineistolähtöinen lähestymistapa lainsäädäntöön ei korvaa oikeudellista tulkintaa. Se tarjoaa kuitenkin jotain, mitä perinteinen lainoppi ei pysty tuottamaan: systemaattisen kuvan siitä, miten lainsäädäntö kokonaisuutena kehittyy. Juristi, joka osaa lukea myös näitä kuvaajia, ymmärtää oikeudellisen ympäristönsä paremmin kuin se, joka lukee vain yksittäisiä lakeja.
+
+Semanttinen Finlex on avointa dataa ja tässä artikkelissa käytetty analyysikoodi on vapaasti saatavilla. Toivon, että artikkeli madaltaa kynnystä vastaavien aineistolähtöisten tarkastelujen tekemiseen myös oikeustieteellisessä tutkimuksessa.
