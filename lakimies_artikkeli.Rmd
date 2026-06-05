@@ -197,6 +197,52 @@ top10 <- muutoskerrat |>
   mutate(nimi = laki_nimet[tunnus])
 
 rikoslaki_n <- top10$muutoksia[top10$tunnus == "39/1889"]
+
+# ── Muutosten ajoittuminen: viive säätämisestä ja muutosten välit ─────────────
+muutokset <- affected |>
+  filter(lahde_statute_type == "Amendment") |>
+  mutate(viive = lahde_vuosi - kohde_vuosi) |>
+  filter(viive >= 0)
+
+# Aika ensimmäiseen muutokseen — rajattu 1990+ säädettyihin lakeihin,
+# joiden koko muutoshistoria on aineistossa näkyvissä (vältetään
+# digitointirajan aiheuttama harha)
+eka_muutos <- muutokset |>
+  filter(kohde_vuosi >= 1990) |>
+  group_by(kohde_href, kohde_vuosi) |>
+  summarise(eka_viive = min(viive), .groups = "drop")
+
+eka_n         <- nrow(eka_muutos)
+eka_mediaani  <- median(eka_muutos$eka_viive)
+eka_samana    <- sum(eka_muutos$eka_viive == 0)
+eka_pct_samana <- round(eka_samana / eka_n * 100)
+eka_2v        <- sum(eka_muutos$eka_viive <= 2)
+eka_pct_2v    <- round(eka_2v / eka_n * 100)
+eka_yli10     <- sum(eka_muutos$eka_viive > 10)
+eka_pct_yli10 <- round(eka_yli10 / eka_n * 100)
+
+# Peräkkäisten muutosten välit
+valit <- muutokset |>
+  arrange(kohde_href, lahde_vuosi) |>
+  group_by(kohde_href) |>
+  filter(n() >= 2) |>
+  mutate(vali = lahde_vuosi - lag(lahde_vuosi)) |>
+  filter(!is.na(vali)) |>
+  ungroup()
+
+vali_mediaani  <- median(valit$vali)
+vali_ka        <- round(mean(valit$vali), 2)
+vali_samana    <- sum(valit$vali == 0)
+vali_pct_samana <- round(vali_samana / nrow(valit) * 100)
+
+# Muutosten määrä lähdevuosittain (tihentymät)
+muutos_per_vuosi <- muutokset |>
+  filter(lahde_vuosi >= VUOSI_ALO, lahde_vuosi <= VUOSI_LOP) |>
+  count(lahde_vuosi)
+mpv_huippu_vuosi <- muutos_per_vuosi$lahde_vuosi[which.max(muutos_per_vuosi$n)]
+mpv_huippu_n     <- max(muutos_per_vuosi$n)
+
+stopifnot(eka_n > 0, nrow(valit) > 0, all(valit$vali >= 0))
 ```
 
 ---
@@ -211,7 +257,7 @@ rikoslaki_n <- top10$muutoksia[top10$tunnus == "39/1889"]
 
 ## Tiivistelmä
 
-Suomen lainsäädäntöä on perinteisesti tarkasteltu yksittäisten säädösten tasolla. Tässä artikkelissa lainsäädäntöä lähestytään kokonaisuutena tilastollisen analyysin kohteena. Aineistona käytetään Finlexin avointa REST-rajapintaa, jonka kautta haettiin `r fmt(n_kaikki)` säädöstä vuosilta `r VUOSI_ALO`–`r VUOSI_LOP`. Analyysi kohdistuu lainsäädäntötahdin kehitykseen ja muutossäädösten osuuden kasvuun. Bayesilaisen muutospiste-analyysin avulla osoitetaan, että säädöstahdin rakenne muuttui tilastollisesti merkitsevästi vuonna `r vuosi_map`. Lisäksi tarkastellaan lakien muutostiheyttä — harvat lait keräävät valtaosan kaikista muutoksista — ja esitetään bayesilainen ennuste säädösvolyymille vuosiksi 2025–2030. Artikkeli osoittaa, että avoin oikeudellinen data tarjoaa kvantitatiivisesti täsmällisen näkökulman lainvalmistelun kehitykseen — näkökulman, jota perinteinen lainoppi ei pysty tuottamaan.
+Suomen lainsäädäntöä on perinteisesti tarkasteltu yksittäisten säädösten tasolla. Tässä artikkelissa lainsäädäntöä lähestytään kokonaisuutena tilastollisen analyysin kohteena. Aineistona käytetään Finlexin avointa REST-rajapintaa, jonka kautta haettiin `r fmt(n_kaikki)` säädöstä vuosilta `r VUOSI_ALO`–`r VUOSI_LOP`. Analyysi kohdistuu lainsäädäntötahdin kehitykseen ja muutossäädösten osuuden kasvuun. Bayesilaisen muutospiste-analyysin avulla osoitetaan, että säädöstahdin rakenne muuttui tilastollisesti merkitsevästi vuonna `r vuosi_map`. Lisäksi tarkastellaan lakien muutostiheyttä — harvat lait keräävät valtaosan kaikista muutoksista — sekä muutosten ajoittumista: puolet laeista muutetaan jo kahden vuoden sisällä säätämisestä. Lopuksi esitetään bayesilainen ennuste säädösvolyymille vuosiksi 2025–2030. Artikkeli osoittaa, että avoin oikeudellinen data tarjoaa kvantitatiivisesti täsmällisen näkökulman lainvalmistelun kehitykseen — näkökulman, jota perinteinen lainoppi ei pysty tuottamaan.
 
 ---
 
@@ -221,7 +267,7 @@ Suomalainen juristi tietää, mitä laki sanoo. Hän osaa etsiä oikeuskäytänt
 
 Tässä artikkelissa vastataan näihin kysymyksiin käyttämällä tilastollista analyysiä ja avointa dataa. Aineistona on Finlexin avoin rajapinta, jonka kautta koko Suomen lainsäädäntö on saatavilla koneluettavassa muodossa. Sen avulla on mahdollista tarkastella lainsäädäntöä ei yksittäisinä teksteinä vaan rakenteellisena kokonaisuutena — jakaumana.
 
-Artikkeli on metodologinen avaus. Se ei pyri oikeudelliseen tulkintaan vaan osoittamaan, millaista tietoa avoimen oikeudellisen datan tilastollinen analyysi voi tuottaa. Tulokset ovat osin yllättäviä: EU-jäsenyyden vaikutus lainsäädäntöön näkyy datassa yhden vuoden tarkkuudella, finanssikriisi 2008–2009 jätti mitattavan jäljen lakikirjaan, ja lakien muutospaine osoittautuu kasautuvan voimakkaasti pieneen joukkoon keskeisiä lakeja.
+Artikkeli on metodologinen avaus. Se ei pyri oikeudelliseen tulkintaan vaan osoittamaan, millaista tietoa avoimen oikeudellisen datan tilastollinen analyysi voi tuottaa. Tulokset ovat osin yllättäviä: EU-jäsenyyden vaikutus lainsäädäntöön näkyy datassa yhden vuoden tarkkuudella, finanssikriisi 2008–2009 jätti mitattavan jäljen lakikirjaan, lakien muutospaine kasautuu voimakkaasti pieneen joukkoon keskeisiä lakeja, ja puolet laeista muutetaan jo kahden vuoden sisällä säätämisestään.
 
 # 2. Aineisto ja menetelmät
 
@@ -384,7 +430,54 @@ top10 |>
   knitr::kable()
 ```
 
-# 7. Lainsäädäntövolyymin ennuste 2025–2030
+# 7. Milloin lakia muutetaan? Muutosten ajoittuminen
+
+Edellä tarkasteltiin sitä, kuinka monta kertaa lakeja muutetaan. Yhtä kiinnostava kysymys on, *milloin* muutokset tapahtuvat suhteessa lain säätämiseen. Koska aineisto sisältää sekä kunkin muutossäädöksen että sen kohdelain vuoden, näiden erotuksesta saadaan muutoksen viive: kuinka monta vuotta lain säätämisestä kului ennen kutakin muutosta.
+
+## 7.1. Aika ensimmäiseen muutokseen
+
+Tarkastellaan ensin sitä, kuinka kauan laki ehtii olla voimassa ennen ensimmäistä muutostaan. Analyysi rajataan vuonna 1990 tai sen jälkeen säädettyihin lakeihin, joiden koko muutoshistoria on aineistossa näkyvissä. Näin vältetään harha, joka syntyisi siitä, että ennen aineiston alkua säädettyjen lakien varhaiset muutokset eivät ole mukana. Tarkasteltavia lakeja on `r fmt(eka_n)`.
+
+Tulos on hätkähdyttävä. Ensimmäisen muutoksen mediaaniviive on vain `r eka_mediaani` vuotta. Peräti `r eka_pct_samana` prosenttia laeista muutetaan jo samana vuonna, jona ne säädetään, ja `r eka_pct_2v` prosenttia kahden vuoden sisällä. Vain `r eka_pct_yli10` prosenttia laeista säilyy muuttumattomana yli kymmenen vuotta. Käytännössä laki ei siis ehdi vakiintua ennen kuin sitä jo korjataan.
+
+Ilmiölle on useita mahdollisia selityksiä. Osa muutoksista on teknisiä korjauksia, jotka olisi voitu tehdä jo alkuperäisessä valmistelussa. Osa heijastaa lainsäädännön kytkeytymistä nopeasti muuttuvaan ympäristöön — erityisesti vero- ja sosiaaliturvalainsäädäntöön, jonka parametreja tarkistetaan vuosittain. Joka tapauksessa havainto haastaa käsityksen laista vakaana ja pysyvänä normina.
+
+```{r kuvio7, fig.cap="Kuvio 7. Aika lain säätämisestä sen ensimmäiseen muutokseen, vuonna 1990 tai myöhemmin säädetyt lait. Suuri osa laeista muutetaan ensimmäisen kahden vuoden aikana.", fig.width=6.5, fig.height=3.8}
+eka_muutos |>
+  filter(eka_viive <= 25) |>
+  ggplot(aes(x = eka_viive)) +
+  geom_histogram(binwidth = 1, fill = "#457b9d", color = "white", linewidth = 0.2) +
+  geom_vline(xintercept = eka_mediaani, color = "#e63946",
+             linetype = "dashed", linewidth = 0.9) +
+  annotate("text", x = eka_mediaani + 0.5, y = Inf, vjust = 2,
+           label = paste0("Mediaani ", eka_mediaani, " v"),
+           hjust = 0, color = "#e63946", size = 3.2) +
+  labs(x = "Vuosia säätämisestä ensimmäiseen muutokseen",
+       y = "Lakien lukumäärä") +
+  theme_minimal(base_size = 11)
+```
+
+## 7.2. Muutosten rytmi
+
+Kun lakia kerran aletaan muuttaa, kuinka tiheään muutokset seuraavat toisiaan? Tämä saadaan selville laskemalla peräkkäisten muutosten väli niille laeille, joita on muutettu vähintään kahdesti. Tällaisia muutosvälejä on aineistossa `r fmt(nrow(valit))`.
+
+Peräkkäisten muutosten mediaaniväli on `r vali_mediaani` vuosi ja keskiarvo `r vali_ka` vuotta. Lisäksi `r vali_pct_samana` prosenttia muutoksista tapahtuu samana vuonna kuin lain edellinen muutos. Toisin sanoen: kun laki kerran joutuu muutosten kohteeksi, se tyypillisesti muuttuu lähes vuosittain. Muutokset eivät jakaudu tasaisesti lain elinkaarelle vaan kasautuvat tiiviiksi jaksoiksi.
+
+## 7.3. Muutosvolyymin kehitys
+
+Muutossäädösten kokonaismäärä on kasvanut tarkastelujaksolla. Eniten muutoksia annettiin vuonna `r mpv_huippu_vuosi` (`r fmt(mpv_huippu_n)` muutossäädöstä). Kuviossa 8 esitetään muutossäädösten vuosittainen määrä, joka kuvaa lainsäädännön muutospaineen kehitystä koko tarkastelujakson ajalta.
+
+```{r kuvio8, fig.cap="Kuvio 8. Muutossäädösten lukumäärä vuosittain (1987–2024).", fig.width=6.5, fig.height=3.8}
+muutos_per_vuosi |>
+  ggplot(aes(x = lahde_vuosi, y = n)) +
+  geom_col(fill = "#457b9d", width = 0.85) +
+  geom_smooth(method = "loess", se = FALSE, color = "#e63946",
+              linewidth = 0.9, span = 0.5) +
+  labs(x = "Vuosi", y = "Muutossäädösten lukumäärä") +
+  theme_minimal(base_size = 11)
+```
+
+# 8. Lainsäädäntövolyymin ennuste 2025–2030
 
 Edellä on tarkasteltu mennyttä kehitystä. Tilastollisen mallin arvo punnitaan kuitenkin usein sen kyvyssä ennustaa. Tässä luvussa esitetään bayesilainen ennuste vuosittaiselle säädösvolyymille vuosiksi 2025–2030.
 
@@ -392,7 +485,7 @@ Ennuste perustuu EU-jäsenyyden jälkeiseen vakaaseen kauteen (1996–2024), jon
 
 Ennusteen mukaan vuonna 2030 säädöksiä annetaan todennäköisimmin `r fmt(ennuste_2030_med)`, mutta 95 prosentin ennusteväli ulottuu `r fmt(ennuste_2030_lo)`:stä `r fmt(ennuste_2030_hi)`:een. Ennusteväli on tarkoituksella leveä: se kertoo rehellisesti, että yksittäisen vuoden säädösmäärää ei voi ennustaa tarkasti, vaikka pitkän aikavälin keskitaso on vakaa. Juuri tämä epävarmuuden eksplisiittinen kuvaaminen erottaa tilastollisen ennusteen arvauksesta.
 
-```{r kuvio6, fig.cap="Kuvio 6. Vuosittaisen säädösvolyymin toteuma 1996–2024 ja bayesilainen ennuste 2025–2030. Tummempi alue on 80 %:n ja vaaleampi 95 %:n ennusteväli.", fig.width=6.5, fig.height=4}
+```{r kuvio9, fig.cap="Kuvio 9. Vuosittaisen säädösvolyymin toteuma 1996–2024 ja bayesilainen ennuste 2025–2030. Tummempi alue on 80 %:n ja vaaleampi 95 %:n ennusteväli.", fig.width=6.5, fig.height=4}
 toteuma <- df_a |>
   filter(vuosi >= 1996) |>
   count(vuosi) |>
@@ -425,11 +518,13 @@ ggplot() +
   theme_minimal(base_size = 11)
 ```
 
-# 8. Päätelmät
+# 9. Päätelmät
 
 Tässä artikkelissa on osoitettu kaksi mitattavaa murrosta Suomen lainsäädäntöhistoriassa. EU-jäsenyys vuonna 1995 kasvatti muutossäädösten suhteellista osuutta pysyvästi — bayesilainen analyysi paikantaa rakenteellisen muutoksen vuoteen `r vuosi_map` yhden vuoden tarkkuudella, ja muutossäädösten osuus kasvoi pysyvästi noin `r round((ratio_jalkeen_map / ratio_ennen_map - 1) * 100)` prosenttia. Finanssikriisi vuonna 2009 näkyi muutossäädösten poikkeuksellisena piikkinä, mikä kuvaa kriisilainsäädännön luonnetta: kiireessä muutetaan olemassa olevaa, ei rakenneta uutta.
 
 Lisäksi osoitettiin, että lakien muutospaine jakautuu erittäin epätasaisesti: `r mt_pct_kerran` prosenttia laeista on muutettu vain kerran, kun taas kymmenen prosenttia eniten muutetuista laeista kerää `r mt_top10pct_osuus` prosenttia kaikista muutoksista. Eniten muutettu säädös on rikoslaki, johon on kohdistunut `r rikoslaki_n` muutossäädöstä. Tämä pitkähäntäinen rakenne tarkoittaa, että lainsäädännön seuraaminen on käytännössä kourallisen keskeisten lakien seuraamista.
+
+Muutosten ajoittumisen analyysi paljasti, että lait muuttuvat nopeasti: ensimmäisen muutoksen mediaaniviive on vain `r eka_mediaani` vuotta ja `r eka_pct_2v` prosenttia laeista muutetaan kahden vuoden sisällä säätämisestä. Kun lakia kerran muutetaan, peräkkäisten muutosten mediaaniväli on vain `r vali_mediaani` vuosi. Laki ei siis ole vakaa normi vaan jatkuvan muokkauksen kohde.
 
 Lisäksi esitettiin bayesilainen ennuste, jonka mukaan säädösvolyymi pysyy lähivuosina vakaana noin `r fmt(volyymi_ka)` säädöksen vuositasolla, joskin yksittäisen vuoden ennusteväli on leveä. Ennusteen arvo ei ole sen tarkkuudessa vaan siinä, että se kuvaa epävarmuuden rehellisesti — toisin kuin piste-ennuste, joka antaisi vääränlaisen vaikutelman varmuudesta.
 
