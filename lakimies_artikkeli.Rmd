@@ -4,7 +4,6 @@ author: "Kristian Vepsäläinen"
 date: "`r format(Sys.Date(), '%d.%m.%Y')`"
 output:
   word_document
-
 ---
 
 ```{r asetukset, include=FALSE}
@@ -155,6 +154,49 @@ statute_ts <- df_a |>
 vuosi_yht    <- df_a |> count(vuosi)
 huippu_vuosi <- vuosi_yht$vuosi[which.max(vuosi_yht$n)]
 huippu_n     <- max(vuosi_yht$n)
+
+# ── Muutostiheys: kuinka monta kertaa kutakin lakia on muutettu ──────────────
+affected <- read_fst(paste0(getwd(), "/data/finlex_affected.fst"))
+
+# Lasketaan muutosten (Amendment) lukumäärä per kohdelaki
+muutoskerrat <- affected |>
+  filter(lahde_statute_type == "Amendment") |>
+  count(kohde_href, kohde_vuosi, kohde_numero, name = "muutoksia")
+
+mt_n_lakia    <- nrow(muutoskerrat)
+mt_mediaani   <- median(muutoskerrat$muutoksia)
+mt_ka         <- round(mean(muutoskerrat$muutoksia), 1)
+mt_max        <- max(muutoskerrat$muutoksia)
+mt_kerran     <- sum(muutoskerrat$muutoksia == 1)
+mt_pct_kerran <- round(mt_kerran / mt_n_lakia * 100)
+mt_yli50      <- sum(muutoskerrat$muutoksia > 50)
+
+# Kuinka suuri osa kaikista muutoksista kohdistuu 10 %:iin eniten muutetuista?
+mt_jarj    <- sort(muutoskerrat$muutoksia, decreasing = TRUE)
+mt_top10pct_n <- ceiling(length(mt_jarj) * 0.10)
+mt_top10pct_osuus <- round(sum(mt_jarj[1:mt_top10pct_n]) / sum(mt_jarj) * 100)
+
+# Top 10 eniten muutettua lakia, varmennetut nimet
+laki_nimet <- c(
+  "39/1889"   = "Rikoslaki",
+  "1535/1992" = "Tuloverolaki",
+  "1290/2002" = "Työttömyysturvalaki",
+  "1501/1993" = "Arvonlisäverolaki",
+  "1224/2004" = "Sairausvakuutuslaki",
+  "301/2004"  = "Ulkomaalaislaki",
+  "1558/1995" = "Laki verotusmenettelystä",
+  "360/1968"  = "Laki elinkeinotulon verottamisesta",
+  "878/2008"  = "Laki Finanssivalvonnasta",
+  "267/1981"  = "Tieliikennelaki"
+)
+
+top10 <- muutoskerrat |>
+  mutate(tunnus = paste0(kohde_numero, "/", kohde_vuosi)) |>
+  arrange(desc(muutoksia)) |>
+  head(10) |>
+  mutate(nimi = laki_nimet[tunnus])
+
+rikoslaki_n <- top10$muutoksia[top10$tunnus == "39/1889"]
 ```
 
 ---
@@ -169,7 +211,7 @@ huippu_n     <- max(vuosi_yht$n)
 
 ## Tiivistelmä
 
-Suomen lainsäädäntöä on perinteisesti tarkasteltu yksittäisten säädösten tasolla. Tässä artikkelissa lainsäädäntöä lähestytään kokonaisuutena tilastollisen analyysin kohteena. Aineistona käytetään Finlexin avointa REST-rajapintaa, jonka kautta haettiin `r fmt(n_kaikki)` säädöstä vuosilta `r VUOSI_ALO`–`r VUOSI_LOP`. Analyysi kohdistuu lainsäädäntötahdin kehitykseen ja muutossäädösten osuuden kasvuun. Bayesilaisen muutospiste-analyysin avulla osoitetaan, että säädöstahdin rakenne muuttui tilastollisesti merkitsevästi vuonna `r vuosi_map`. Lisäksi esitetään bayesilainen ennuste säädösvolyymille vuosiksi 2025–2030. Artikkeli osoittaa, että avoin oikeudellinen data tarjoaa kvantitatiivisesti täsmällisen näkökulman lainvalmistelun kehitykseen — näkökulman, jota perinteinen lainoppi ei pysty tuottamaan.
+Suomen lainsäädäntöä on perinteisesti tarkasteltu yksittäisten säädösten tasolla. Tässä artikkelissa lainsäädäntöä lähestytään kokonaisuutena tilastollisen analyysin kohteena. Aineistona käytetään Finlexin avointa REST-rajapintaa, jonka kautta haettiin `r fmt(n_kaikki)` säädöstä vuosilta `r VUOSI_ALO`–`r VUOSI_LOP`. Analyysi kohdistuu lainsäädäntötahdin kehitykseen ja muutossäädösten osuuden kasvuun. Bayesilaisen muutospiste-analyysin avulla osoitetaan, että säädöstahdin rakenne muuttui tilastollisesti merkitsevästi vuonna `r vuosi_map`. Lisäksi tarkastellaan lakien muutostiheyttä — harvat lait keräävät valtaosan kaikista muutoksista — ja esitetään bayesilainen ennuste säädösvolyymille vuosiksi 2025–2030. Artikkeli osoittaa, että avoin oikeudellinen data tarjoaa kvantitatiivisesti täsmällisen näkökulman lainvalmistelun kehitykseen — näkökulman, jota perinteinen lainoppi ei pysty tuottamaan.
 
 ---
 
@@ -179,7 +221,7 @@ Suomalainen juristi tietää, mitä laki sanoo. Hän osaa etsiä oikeuskäytänt
 
 Tässä artikkelissa vastataan näihin kysymyksiin käyttämällä tilastollista analyysiä ja avointa dataa. Aineistona on Finlexin avoin rajapinta, jonka kautta koko Suomen lainsäädäntö on saatavilla koneluettavassa muodossa. Sen avulla on mahdollista tarkastella lainsäädäntöä ei yksittäisinä teksteinä vaan rakenteellisena kokonaisuutena — jakaumana.
 
-Artikkeli on metodologinen avaus. Se ei pyri oikeudelliseen tulkintaan vaan osoittamaan, millaista tietoa avoimen oikeudellisen datan tilastollinen analyysi voi tuottaa. Tulokset ovat osin yllättäviä: EU-jäsenyyden vaikutus lainsäädäntöön näkyy datassa yhden vuoden tarkkuudella, ja finanssikriisi 2008–2009 jätti mitattavan jäljen lakikirjaan.
+Artikkeli on metodologinen avaus. Se ei pyri oikeudelliseen tulkintaan vaan osoittamaan, millaista tietoa avoimen oikeudellisen datan tilastollinen analyysi voi tuottaa. Tulokset ovat osin yllättäviä: EU-jäsenyyden vaikutus lainsäädäntöön näkyy datassa yhden vuoden tarkkuudella, finanssikriisi 2008–2009 jätti mitattavan jäljen lakikirjaan, ja lakien muutospaine osoittautuu kasautuvan voimakkaasti pieneen joukkoon keskeisiä lakeja.
 
 # 2. Aineisto ja menetelmät
 
@@ -312,7 +354,37 @@ data.frame(vuosi = vuodet, posteriori = post) |>
   theme_minimal(base_size = 11)
 ```
 
-# 6. Lainsäädäntövolyymin ennuste 2025–2030
+# 6. Lakien muutostiheys: harvat lait keräävät valtaosan muutoksista
+
+Tähän asti lainsäädäntöä on tarkasteltu vuositasolla. Finlexin aineisto mahdollistaa kuitenkin myös tarkemman kysymyksen: mitkä yksittäiset lait muuttuvat eniten? Jokainen muutossäädös sisältää koneluettavan viittauksen siihen lakiin, jota se muuttaa.^[Akoma Ntoso -muodossa tämä on affectedDocument-elementti, joka yksilöi muutettavan säädöksen URI-tunnisteella.] Laskemalla nämä viittaukset saadaan selville, kuinka monta kertaa kutakin lakia on muutettu tarkastelujakson aikana.
+
+Aineistossa on `r fmt(mt_n_lakia)` lakia, joihin on kohdistunut vähintään yksi muutos vuosina `r VUOSI_ALO`–`r VUOSI_LOP`. Muutosten jakauma on voimakkaasti vino: mediaanilakia on muutettu `r mt_mediaani` kertaa, mutta keskiarvo on `r mt_ka`, mikä kertoo pitkästä hännästä. Peräti `r fmt(mt_kerran)` lakia (`r mt_pct_kerran` %) on muutettu vain kerran, kun taas `r mt_yli50` lakia on muutettu yli 50 kertaa. Kymmenen prosenttia eniten muutetuista laeista kerää `r mt_top10pct_osuus` prosenttia kaikista muutoksista.
+
+Tämä on tyypillinen pitkähäntäinen jakauma — sama rakenne, joka toistuu monissa yhteiskunnallisissa ja luonnollisissa ilmiöissä. Lainsäädännön muutospaine ei jakaudu tasaisesti, vaan kasautuu pieneen joukkoon keskeisiä lakeja. Käytännössä tämä tarkoittaa, että juristin työtä kuormittaa eniten kourallinen jatkuvasti muuttuvia lakeja.
+
+```{r kuvio5, fig.cap="Kuvio 5. Lakien muutostiheyden jakauma (1987–2024). Vaaka-akseli on logaritminen. Suurin osa laeista on muutettu vain muutaman kerran, harvat kymmeniä tai satoja kertoja.", fig.width=6.5, fig.height=3.8}
+muutoskerrat |>
+  ggplot(aes(x = muutoksia)) +
+  geom_histogram(bins = 40, fill = "#457b9d", color = "white", linewidth = 0.2) +
+  scale_x_log10() +
+  labs(x = "Muutosten lukumäärä (log-asteikko)",
+       y = "Lakien lukumäärä") +
+  theme_minimal(base_size = 11)
+```
+
+Taulukossa 1 on esitetty kymmenen eniten muutettua lakia. Lista on hallinnollisesti johdonmukainen: kärjessä ovat verolait ja sosiaaliturvalait, joiden sisältö on sidoksissa vuosittain muuttuviin taloudellisiin parametreihin ja poliittisiin painotuksiin. Eniten muutettu yksittäinen säädös on rikoslaki (39/1889), johon on kohdistunut `r rikoslaki_n` erillistä muutossäädöstä tarkastelujakson aikana. Yli 130 vuotta vanha laki on siis edelleen jatkuvan muokkauksen kohteena.
+
+```{r taulukko1}
+top10 |>
+  transmute(
+    `Laki` = ifelse(is.na(nimi), tunnus, nimi),
+    `Säädöstunnus` = tunnus,
+    `Muutoksia` = muutoksia
+  ) |>
+  knitr::kable()
+```
+
+# 7. Lainsäädäntövolyymin ennuste 2025–2030
 
 Edellä on tarkasteltu mennyttä kehitystä. Tilastollisen mallin arvo punnitaan kuitenkin usein sen kyvyssä ennustaa. Tässä luvussa esitetään bayesilainen ennuste vuosittaiselle säädösvolyymille vuosiksi 2025–2030.
 
@@ -320,7 +392,7 @@ Ennuste perustuu EU-jäsenyyden jälkeiseen vakaaseen kauteen (1996–2024), jon
 
 Ennusteen mukaan vuonna 2030 säädöksiä annetaan todennäköisimmin `r fmt(ennuste_2030_med)`, mutta 95 prosentin ennusteväli ulottuu `r fmt(ennuste_2030_lo)`:stä `r fmt(ennuste_2030_hi)`:een. Ennusteväli on tarkoituksella leveä: se kertoo rehellisesti, että yksittäisen vuoden säädösmäärää ei voi ennustaa tarkasti, vaikka pitkän aikavälin keskitaso on vakaa. Juuri tämä epävarmuuden eksplisiittinen kuvaaminen erottaa tilastollisen ennusteen arvauksesta.
 
-```{r kuvio5, fig.cap="Kuvio 5. Vuosittaisen säädösvolyymin toteuma 1996–2024 ja bayesilainen ennuste 2025–2030. Tummempi alue on 80 %:n ja vaaleampi 95 %:n ennusteväli.", fig.width=6.5, fig.height=4}
+```{r kuvio6, fig.cap="Kuvio 6. Vuosittaisen säädösvolyymin toteuma 1996–2024 ja bayesilainen ennuste 2025–2030. Tummempi alue on 80 %:n ja vaaleampi 95 %:n ennusteväli.", fig.width=6.5, fig.height=4}
 toteuma <- df_a |>
   filter(vuosi >= 1996) |>
   count(vuosi) |>
@@ -353,15 +425,17 @@ ggplot() +
   theme_minimal(base_size = 11)
 ```
 
-# 7. Päätelmät
+# 8. Päätelmät
 
 Tässä artikkelissa on osoitettu kaksi mitattavaa murrosta Suomen lainsäädäntöhistoriassa. EU-jäsenyys vuonna 1995 kasvatti muutossäädösten suhteellista osuutta pysyvästi — bayesilainen analyysi paikantaa rakenteellisen muutoksen vuoteen `r vuosi_map` yhden vuoden tarkkuudella, ja muutossäädösten osuus kasvoi pysyvästi noin `r round((ratio_jalkeen_map / ratio_ennen_map - 1) * 100)` prosenttia. Finanssikriisi vuonna 2009 näkyi muutossäädösten poikkeuksellisena piikkinä, mikä kuvaa kriisilainsäädännön luonnetta: kiireessä muutetaan olemassa olevaa, ei rakenneta uutta.
+
+Lisäksi osoitettiin, että lakien muutospaine jakautuu erittäin epätasaisesti: `r mt_pct_kerran` prosenttia laeista on muutettu vain kerran, kun taas kymmenen prosenttia eniten muutetuista laeista kerää `r mt_top10pct_osuus` prosenttia kaikista muutoksista. Eniten muutettu säädös on rikoslaki, johon on kohdistunut `r rikoslaki_n` muutossäädöstä. Tämä pitkähäntäinen rakenne tarkoittaa, että lainsäädännön seuraaminen on käytännössä kourallisen keskeisten lakien seuraamista.
 
 Lisäksi esitettiin bayesilainen ennuste, jonka mukaan säädösvolyymi pysyy lähivuosina vakaana noin `r fmt(volyymi_ka)` säädöksen vuositasolla, joskin yksittäisen vuoden ennusteväli on leveä. Ennusteen arvo ei ole sen tarkkuudessa vaan siinä, että se kuvaa epävarmuuden rehellisesti — toisin kuin piste-ennuste, joka antaisi vääränlaisen vaikutelman varmuudesta.
 
 Nämä havainnot eivät ole oikeudellisesti yllättäviä — EU-jäsenyyden ja finanssikriisin merkitys on tiedossa. Se mikä on uutta, on täsmällisyys: nyt voidaan sanoa numeroin, kuinka suuri muutos oli, milloin se alkoi ja kuinka kauan se kesti. Data ulottuu vuoteen 2024, joten kysymys ei ole oikeushistoriasta vaan nykyisestä lainsäädäntötodellisuudesta.
 
-Jatkotutkimukselle on useita luontevia suuntia. Asiakirjatyyppien (laki, asetus, valtioneuvoston asetus) kehityksen analyysi valottaisi, onko säätely siirtynyt eduskuntalaeista alemmanasteiseen normistoon. Viittaussuhteiden analyysi paljastaisi ns. solmulait, joihin koko normisto nojaa. EU-direktiivien implementointiaikataulujen yhdistäminen Finlexin dataan mahdollistaisi sen arvioimisen, kuinka nopeasti eri hallinnonaloilla direktiivit muutetaan kansalliseksi lainsäädännöksi.
+Jatkotutkimukselle on useita luontevia suuntia. Asiakirjatyyppien (laki, asetus, valtioneuvoston asetus) kehityksen analyysi valottaisi, onko säätely siirtynyt eduskuntalaeista alemmanasteiseen normistoon. Lakien viittausverkoston analyysi paljastaisi ns. solmulait, joihin koko normisto nojaa. EU-direktiivien implementointiaikataulujen yhdistäminen Finlexin dataan mahdollistaisi sen arvioimisen, kuinka nopeasti eri hallinnonaloilla direktiivit muutetaan kansalliseksi lainsäädännöksi.
 
 Aineistolähtöinen lähestymistapa lainsäädäntöön ei korvaa oikeudellista tulkintaa. Se tarjoaa kuitenkin jotain, mitä perinteinen lainoppi ei pysty tuottamaan: systemaattisen kuvan siitä, miten lainsäädäntö kokonaisuutena kehittyy. Juristi, joka osaa lukea myös näitä kuvaajia, ymmärtää oikeudellisen ympäristönsä paremmin kuin se, joka lukee vain yksittäisiä lakeja.
 
