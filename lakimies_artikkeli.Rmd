@@ -88,55 +88,66 @@ ci_hi     <- vuodet[which(cdf >= 0.975)[1]]
 ratio_ennen_map   <- round(mean(y[1:(tau_map - 1)]), 2)
 ratio_jalkeen_map <- round(mean(y[tau_map:n_obs]), 2)
 
-# ── Bayesilainen ennuste säädösvolyymille 2025–2030 ───────────────────────────
-# Mallinnetaan vuosittainen säädösmäärä EU-jäsenyyden jälkeiseltä vakaalta
-# kaudelta (1996–2024). Käytetään log-normaalia bayesilaista mallia
-# heikosti informatiivisilla prioreilla ja simuloidaan posterioriennuste.
+# ── Bayesilainen trendiennuste uusille säädöksille 2025–2030 ──────────────────
+# Vuosittainen kokonaismäärä on käytännössä kohinaa (autokorrelaatio ~0),
+# joten sitä ei voi ennustaa mielekkäästi. Sen sijaan uusien säädösten määrä
+# on aidosti ennustettava: vahva laskeva trendi ja korkea autokorrelaatio.
+# Mallinnetaan log-skaalalla lineaarisella trendillä ja simuloidaan
+# posterioriennuste parametrien epävarmuus huomioiden.
 set.seed(42)
 
-ennuste_data <- df_a |>
-  filter(vuosi >= 1996, vuosi <= VUOSI_LOP) |>
-  count(vuosi)
+uudet_ts <- df_a |>
+  filter(statute_type == "NewStatute") |>
+  count(vuosi, name = "n")
 
-log_y     <- log(ennuste_data$n)
-n_hav     <- length(log_y)
-mean_log  <- mean(log_y)
-sd_log    <- sd(log_y)
+# Käytetään 2000+ kautta, jolla trendi on vakaa
+ennuste_train <- uudet_ts |> filter(vuosi >= 2000)
+x_tr <- ennuste_train$vuosi - 2000
+y_tr <- log(ennuste_train$n)
 
-# Posteriorijakauma keskiarvolle (tunnettu varianssi -approksimaatio):
-# mu | data ~ Normal(mean_log, sd_log^2 / n)
-# Posterioriennuste uudelle havainnolle: Normal(mu, sd_log^2)
-# Marginalisoidaan epävarmuus simuloimalla
-n_sim       <- 10000
-ennustevuodet <- (VUOSI_LOP + 1):2030
-ennuste_matrix <- matrix(NA, nrow = n_sim, ncol = length(ennustevuodet))
+fit_lm    <- lm(y_tr ~ x_tr)
+beta_hat  <- coef(fit_lm)
+sigma_hat <- summary(fit_lm)$sigma
+vcov_hat  <- vcov(fit_lm)
 
-for (j in seq_along(ennustevuodet)) {
-  mu_sim    <- rnorm(n_sim, mean_log, sd_log / sqrt(n_hav))
-  pred_log  <- rnorm(n_sim, mu_sim, sd_log)
-  ennuste_matrix[, j] <- exp(pred_log)
+# Vuosimuutos prosentteina
+vuosimuutos_pct <- round((exp(beta_hat[2]) - 1) * 100, 1)
+
+# Simuloi posterioriennuste
+n_sim          <- 10000
+ennustevuodet  <- (VUOSI_LOP + 1):2030
+xx             <- ennustevuodet - 2000
+ennuste_matrix <- matrix(NA, n_sim, length(xx))
+
+# Monivariate normaali parametreille (analyyttinen posteriori heikolla priorilla)
+L <- chol(vcov_hat)
+for (s in seq_len(n_sim)) {
+  b_sim <- beta_hat + as.numeric(t(L) %*% rnorm(2))
+  mu    <- b_sim[1] + b_sim[2] * xx
+  ennuste_matrix[s, ] <- exp(rnorm(length(xx), mu, sigma_hat))
 }
 
 ennuste_yhteenveto <- data.frame(
-  vuosi  = ennustevuodet,
+  vuosi    = ennustevuodet,
   mediaani = round(apply(ennuste_matrix, 2, median)),
-  lo80   = round(apply(ennuste_matrix, 2, quantile, 0.10)),
-  hi80   = round(apply(ennuste_matrix, 2, quantile, 0.90)),
-  lo95   = round(apply(ennuste_matrix, 2, quantile, 0.025)),
-  hi95   = round(apply(ennuste_matrix, 2, quantile, 0.975))
+  lo80     = round(apply(ennuste_matrix, 2, quantile, 0.10)),
+  hi80     = round(apply(ennuste_matrix, 2, quantile, 0.90)),
+  lo95     = round(apply(ennuste_matrix, 2, quantile, 0.025)),
+  hi95     = round(apply(ennuste_matrix, 2, quantile, 0.975))
 )
 
-# Keskimääräinen vuosivolyymi vakaalla kaudella
-volyymi_ka <- round(mean(ennuste_data$n))
+uudet_2024       <- uudet_ts$n[uudet_ts$vuosi == 2024]
 ennuste_2030_med <- ennuste_yhteenveto$mediaani[ennuste_yhteenveto$vuosi == 2030]
 ennuste_2030_lo  <- ennuste_yhteenveto$lo95[ennuste_yhteenveto$vuosi == 2030]
 ennuste_2030_hi  <- ennuste_yhteenveto$hi95[ennuste_yhteenveto$vuosi == 2030]
 
-# Validointitarkistus
+# Autokorrelaatiot kontekstia varten
+ac_uudet   <- round(cor(uudet_ts$n[-1], head(uudet_ts$n, -1)), 2)
+
 stopifnot(
   all(ennuste_yhteenveto$lo95 <= ennuste_yhteenveto$mediaani),
   all(ennuste_yhteenveto$mediaani <= ennuste_yhteenveto$hi95),
-  nrow(ennuste_yhteenveto) == length(ennustevuodet)
+  beta_hat[2] < 0  # varmistetaan että trendi on laskeva
 )
 
 # ── Apufunktio ────────────────────────────────────────────────────────────────
@@ -243,6 +254,34 @@ mpv_huippu_vuosi <- muutos_per_vuosi$lahde_vuosi[which.max(muutos_per_vuosi$n)]
 mpv_huippu_n     <- max(muutos_per_vuosi$n)
 
 stopifnot(eka_n > 0, nrow(valit) > 0, all(valit$vali >= 0))
+
+# ── Rikastettu metadata: kuukausi, säädöstyyppi, pituus ───────────────────────
+rik <- read_fst(paste0(getwd(), "/data/finlex_rikastettu.fst"))
+rik_a <- rik |> filter(vuosi >= VUOSI_ALO, vuosi <= VUOSI_LOP)
+
+# Kuukausijakauma
+kk_data <- rik_a |> filter(!is.na(kuukausi)) |> count(kuukausi)
+kk_joulu     <- kk_data$n[kk_data$kuukausi == 12]
+kk_joulu_pct <- round(kk_joulu / sum(kk_data$n) * 100)
+kk_heina     <- kk_data$n[kk_data$kuukausi == 7]
+kk_joulu_kerroin <- round(kk_joulu / kk_heina, 1)
+
+# Joulukuun osuus säädöstyypeittäin
+joulu_amend <- round(mean(rik_a$kuukausi[rik_a$statute_type == "Amendment"] == 12, na.rm = TRUE) * 100, 1)
+joulu_new   <- round(mean(rik_a$kuukausi[rik_a$statute_type == "NewStatute"] == 12, na.rm = TRUE) * 100, 1)
+
+# Säädöstyyppijakauma (otsikosta johdettu)
+luokka_data <- rik_a |> filter(saados_luokka != "Muu") |> count(saados_luokka, sort = TRUE)
+n_laki_luokka <- luokka_data$n[luokka_data$saados_luokka == "Laki"]
+pct_laki_luokka <- round(n_laki_luokka / sum(luokka_data$n) * 100)
+
+# Pituusjakauma
+pituus_mediaani <- median(rik_a$n_pykala, na.rm = TRUE)
+pituus_ka       <- round(mean(rik_a$n_pykala, na.rm = TRUE), 1)
+pituus_max      <- max(rik_a$n_pykala, na.rm = TRUE)
+pituus_alle3    <- round(mean(rik_a$n_pykala <= 2, na.rm = TRUE) * 100)
+
+stopifnot(nrow(kk_data) == 12, nrow(luokka_data) > 0)
 ```
 
 ---
@@ -257,7 +296,7 @@ stopifnot(eka_n > 0, nrow(valit) > 0, all(valit$vali >= 0))
 
 ## Tiivistelmä
 
-Suomen lainsäädäntöä on perinteisesti tarkasteltu yksittäisten säädösten tasolla. Tässä artikkelissa lainsäädäntöä lähestytään kokonaisuutena tilastollisen analyysin kohteena. Aineistona käytetään Finlexin avointa REST-rajapintaa, jonka kautta haettiin `r fmt(n_kaikki)` säädöstä vuosilta `r VUOSI_ALO`–`r VUOSI_LOP`. Analyysi kohdistuu lainsäädäntötahdin kehitykseen ja muutossäädösten osuuden kasvuun. Bayesilaisen muutospiste-analyysin avulla osoitetaan, että säädöstahdin rakenne muuttui tilastollisesti merkitsevästi vuonna `r vuosi_map`. Lisäksi tarkastellaan lakien muutostiheyttä — harvat lait keräävät valtaosan kaikista muutoksista — sekä muutosten ajoittumista: puolet laeista muutetaan jo kahden vuoden sisällä säätämisestä. Lopuksi esitetään bayesilainen ennuste säädösvolyymille vuosiksi 2025–2030. Artikkeli osoittaa, että avoin oikeudellinen data tarjoaa kvantitatiivisesti täsmällisen näkökulman lainvalmistelun kehitykseen — näkökulman, jota perinteinen lainoppi ei pysty tuottamaan.
+Suomen lainsäädäntöä on perinteisesti tarkasteltu yksittäisten säädösten tasolla. Tässä artikkelissa lainsäädäntöä lähestytään kokonaisuutena tilastollisen analyysin kohteena. Aineistona käytetään Finlexin avointa REST-rajapintaa, jonka kautta haettiin `r fmt(n_kaikki)` säädöstä vuosilta `r VUOSI_ALO`–`r VUOSI_LOP`. Analyysi kohdistuu lainsäädäntötahdin kehitykseen ja muutossäädösten osuuden kasvuun. Bayesilaisen muutospiste-analyysin avulla osoitetaan, että säädöstahdin rakenne muuttui tilastollisesti merkitsevästi vuonna `r vuosi_map`. Lisäksi tarkastellaan lakien muutostiheyttä — harvat lait keräävät valtaosan kaikista muutoksista — sekä muutosten ajoittumista: puolet laeista muutetaan jo kahden vuoden sisällä säätämisestä. Säädösten antaminen keskittyy voimakkaasti joulukuuhun, ja säädösten pituus noudattaa vinoa jakaumaa. Lopuksi esitetään bayesilainen trendiennuste, jonka mukaan uusien säädösten määrä laskee systemaattisesti vuoteen 2030 saakka. Artikkeli osoittaa, että avoin oikeudellinen data tarjoaa kvantitatiivisesti täsmällisen näkökulman lainvalmistelun kehitykseen — näkökulman, jota perinteinen lainoppi ei pysty tuottamaan.
 
 ---
 
@@ -267,7 +306,7 @@ Suomalainen juristi tietää, mitä laki sanoo. Hän osaa etsiä oikeuskäytänt
 
 Tässä artikkelissa vastataan näihin kysymyksiin käyttämällä tilastollista analyysiä ja avointa dataa. Aineistona on Finlexin avoin rajapinta, jonka kautta koko Suomen lainsäädäntö on saatavilla koneluettavassa muodossa. Sen avulla on mahdollista tarkastella lainsäädäntöä ei yksittäisinä teksteinä vaan rakenteellisena kokonaisuutena — jakaumana.
 
-Artikkeli on metodologinen avaus. Se ei pyri oikeudelliseen tulkintaan vaan osoittamaan, millaista tietoa avoimen oikeudellisen datan tilastollinen analyysi voi tuottaa. Tulokset ovat osin yllättäviä: EU-jäsenyyden vaikutus lainsäädäntöön näkyy datassa yhden vuoden tarkkuudella, finanssikriisi 2008–2009 jätti mitattavan jäljen lakikirjaan, lakien muutospaine kasautuu voimakkaasti pieneen joukkoon keskeisiä lakeja, ja puolet laeista muutetaan jo kahden vuoden sisällä säätämisestään.
+Artikkeli on metodologinen avaus. Se ei pyri oikeudelliseen tulkintaan vaan osoittamaan, millaista tietoa avoimen oikeudellisen datan tilastollinen analyysi voi tuottaa. Tulokset ovat osin yllättäviä: EU-jäsenyyden vaikutus lainsäädäntöön näkyy datassa yhden vuoden tarkkuudella, finanssikriisi 2008–2009 jätti mitattavan jäljen lakikirjaan, lakien muutospaine kasautuu voimakkaasti pieneen joukkoon keskeisiä lakeja, puolet laeista muutetaan jo kahden vuoden sisällä säätämisestään, ja yli neljännes koko vuoden lainsäädännöstä annetaan joulukuussa.
 
 # 2. Aineisto ja menetelmät
 
@@ -442,7 +481,7 @@ Tulos on hätkähdyttävä. Ensimmäisen muutoksen mediaaniviive on vain `r eka_
 
 Ilmiölle on useita mahdollisia selityksiä. Osa muutoksista on teknisiä korjauksia, jotka olisi voitu tehdä jo alkuperäisessä valmistelussa. Osa heijastaa lainsäädännön kytkeytymistä nopeasti muuttuvaan ympäristöön — erityisesti vero- ja sosiaaliturvalainsäädäntöön, jonka parametreja tarkistetaan vuosittain. Joka tapauksessa havainto haastaa käsityksen laista vakaana ja pysyvänä normina.
 
-```{r kuvio7, fig.cap="Kuvio 7. Aika lain säätämisestä sen ensimmäiseen muutokseen, vuonna 1990 tai myöhemmin säädetyt lait. Suuri osa laeista muutetaan ensimmäisen kahden vuoden aikana.", fig.width=6.5, fig.height=3.8}
+```{r kuvio6, fig.cap="Kuvio 6. Aika lain säätämisestä sen ensimmäiseen muutokseen, vuonna 1990 tai myöhemmin säädetyt lait. Suuri osa laeista muutetaan ensimmäisen kahden vuoden aikana.", fig.width=6.5, fig.height=3.8}
 eka_muutos |>
   filter(eka_viive <= 25) |>
   ggplot(aes(x = eka_viive)) +
@@ -467,7 +506,7 @@ Peräkkäisten muutosten mediaaniväli on `r vali_mediaani` vuosi ja keskiarvo `
 
 Muutossäädösten kokonaismäärä on kasvanut tarkastelujaksolla. Eniten muutoksia annettiin vuonna `r mpv_huippu_vuosi` (`r fmt(mpv_huippu_n)` muutossäädöstä). Kuviossa 8 esitetään muutossäädösten vuosittainen määrä, joka kuvaa lainsäädännön muutospaineen kehitystä koko tarkastelujakson ajalta.
 
-```{r kuvio8, fig.cap="Kuvio 8. Muutossäädösten lukumäärä vuosittain (1987–2024).", fig.width=6.5, fig.height=3.8}
+```{r kuvio7, fig.cap="Kuvio 7. Muutossäädösten lukumäärä vuosittain (1987–2024).", fig.width=6.5, fig.height=3.8}
 muutos_per_vuosi |>
   ggplot(aes(x = lahde_vuosi, y = n)) +
   geom_col(fill = "#457b9d", width = 0.85) +
@@ -477,35 +516,88 @@ muutos_per_vuosi |>
   theme_minimal(base_size = 11)
 ```
 
-# 8. Lainsäädäntövolyymin ennuste 2025–2030
+# 8. Lainsäädännön muoto: ajoitus, tyyppi ja pituus
 
-Edellä on tarkasteltu mennyttä kehitystä. Tilastollisen mallin arvo punnitaan kuitenkin usein sen kyvyssä ennustaa. Tässä luvussa esitetään bayesilainen ennuste vuosittaiselle säädösvolyymille vuosiksi 2025–2030.
+Tähän asti on tarkasteltu säädösten lukumääriä ja ajallista kehitystä. Finlexin aineisto sisältää kuitenkin myös tietoa säädösten muodosta: milloin vuodessa niitä annetaan, minkä tyyppisiä ne ovat ja kuinka pitkiä. Nämä kolme näkökulmaa avaavat lainsäädäntöön mittakaavan, jota ei tavallisesti hahmoteta.
 
-Ennuste perustuu EU-jäsenyyden jälkeiseen vakaaseen kauteen (1996–2024), jonka aikana vuosittainen säädösmäärä on ollut keskimäärin `r fmt(volyymi_ka)`. Vuosittainen säädösmäärä mallinnetaan log-normaalijakautuneena, mikä sopii positiivisille lukumäärämuuttujille. Mallin parametrien epävarmuus huomioidaan bayesilaisittain: ennuste ei ole yksittäinen luku vaan jakauma, joka kuvaa kaiken sen epävarmuuden, joka tulevaisuuden säädösmäärään liittyy. Tämä on olennaista — piste-ennuste antaisi harhaanjohtavan kuvan tarkkuudesta, jota mallilla ei ole.
+## 8.1. Joulukuun ilmiö
 
-Ennusteen mukaan vuonna 2030 säädöksiä annetaan todennäköisimmin `r fmt(ennuste_2030_med)`, mutta 95 prosentin ennusteväli ulottuu `r fmt(ennuste_2030_lo)`:stä `r fmt(ennuste_2030_hi)`:een. Ennusteväli on tarkoituksella leveä: se kertoo rehellisesti, että yksittäisen vuoden säädösmäärää ei voi ennustaa tarkasti, vaikka pitkän aikavälin keskitaso on vakaa. Juuri tämä epävarmuuden eksplisiittinen kuvaaminen erottaa tilastollisen ennusteen arvauksesta.
+Säädösten antaminen ei jakaudu tasaisesti vuoden kuukausille. Päinvastoin: jakauma on äärimmäisen vino. Joulukuussa annetaan `r fmt(kk_joulu)` säädöstä eli `r kk_joulu_pct` prosenttia koko vuoden tuotannosta — yli neljännes lainsäädännöstä syntyy yhden kuukauden aikana. Heinäkuuhun verrattuna joulukuun volyymi on `r kk_joulu_kerroin`-kertainen.
 
-```{r kuvio9, fig.cap="Kuvio 9. Vuosittaisen säädösvolyymin toteuma 1996–2024 ja bayesilainen ennuste 2025–2030. Tummempi alue on 80 %:n ja vaaleampi 95 %:n ennusteväli.", fig.width=6.5, fig.height=4}
-toteuma <- df_a |>
-  filter(vuosi >= 1996) |>
-  count(vuosi) |>
-  rename(maara = n)
+Ilmiö on rakenteellinen eikä rajoitu mihinkään yksittäiseen säädöstyyppiin. Joulukuun osuus on lähes sama sekä muutossäädöksissä (`r joulu_amend` %) että uusissa säädöksissä (`r joulu_new` %). Selitys löytyy voimaantulon ajoituksesta: valtaosa säädöksistä tulee voimaan vuodenvaihteessa, mikä edellyttää niiden antamista joulukuussa. Lainsäädäntökoneisto noudattaa siis vahvaa vuosirytmiä, jossa loppuvuosi on ruuhkaisin.
+
+Tällä on käytännön merkitystä. Joulukuun säädöstulva tarkoittaa, että suuri osa vuoden oikeudellisista muutoksista on omaksuttava lyhyessä ajassa juuri ennen niiden voimaantuloa. Tämä asettaa haasteita sekä lainvalmistelun laadulle että niille, joiden on sovellettava uusia säännöksiä.
+
+```{r kuvio8, fig.cap="Kuvio 8. Säädösten antaminen kuukausittain (1987–2024). Joulukuu erottuu selvästi muista kuukausista.", fig.width=6.5, fig.height=3.8}
+kk_nimet <- c("Tammi","Helmi","Maalis","Huhti","Touko","Kesä",
+              "Heinä","Elo","Syys","Loka","Marras","Joulu")
+kk_data |>
+  mutate(kk_nimi = factor(kk_nimet[kuukausi], levels = kk_nimet)) |>
+  ggplot(aes(x = kk_nimi, y = n)) +
+  geom_col(aes(fill = kuukausi == 12), show.legend = FALSE) +
+  scale_fill_manual(values = c(`FALSE` = "#457b9d", `TRUE` = "#e63946")) +
+  labs(x = NULL, y = "Säädösten lukumäärä") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## 8.2. Säädöstyyppien kirjo
+
+Säädöksen otsikosta voidaan päätellä sen oikeudellinen muoto. Aineiston säädöksistä `r pct_laki_luokka` prosenttia on lakeja, ja loput jakautuvat asetuksiin, valtioneuvoston ja ministeriöiden asetuksiin sekä erilaisiin päätöksiin. Tämä havainnollistaa, että merkittävä osa velvoittavasta normistosta syntyy muualla kuin eduskunnassa — asetuksin ja päätöksin, joiden valmisteluun ja hyväksymiseen liittyy eri menettely kuin lakeihin.
+
+```{r kuvio9, fig.cap="Kuvio 9. Säädösten jakautuminen oikeudellisen muodon mukaan (1987–2024). Luokittelu perustuu säädöksen otsikkoon.", fig.width=6.5, fig.height=4}
+luokka_data |>
+  mutate(saados_luokka = reorder(saados_luokka, n)) |>
+  ggplot(aes(x = n, y = saados_luokka)) +
+  geom_col(fill = "#457b9d") +
+  geom_text(aes(label = fmt(n)), hjust = -0.1, size = 3) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.18))) +
+  labs(x = "Säädösten lukumäärä (uokittelu perustuu säädöksen otsikkoon)", y = NULL) +
+  theme_minimal(base_size = 11)
+```
+
+## 8.3. Säädösten pituus
+
+Säädösten pituus vaihtelee dramaattisesti. Mediaanisäädös sisältää vain `r pituus_mediaani` pykälää, ja `r pituus_alle3` prosenttia säädöksistä on enintään kahden pykälän mittaisia — tyypillisesti yksittäisiä muutoksia olemassa olevaan lakiin. Keskiarvo on kuitenkin `r pituus_ka` pykälää, ja pisin yksittäinen säädös sisältää `r fmt(pituus_max)` pykälää. Jakauma on jälleen voimakkaasti vino: valtaosa säädöksistä on lyhyitä, mutta harvat ovat hyvin pitkiä.
+
+Tämä rakenne selittää, miksi säädösten lukumäärä antaa harhaanjohtavan kuvan lainsäädännön todellisesta laajuudesta. Yksi pitkä laki voi sisältää enemmän normatiivista ainesta kuin sata lyhyttä muutossäädöstä. Säädösten lukumäärän kasvu ei siis välttämättä tarkoita, että sääntelyn kokonaismäärä kasvaisi samassa suhteessa.
+
+```{r kuvio10, fig.cap="Kuvio 10. Säädösten pituuden jakauma pykälämäärän mukaan (1987–2024). Vaaka-akseli on logaritminen.", fig.width=6.5, fig.height=3.8}
+rik_a |>
+  filter(n_pykala >= 1) |>
+  ggplot(aes(x = n_pykala)) +
+  geom_histogram(bins = 40, fill = "#457b9d", color = "white", linewidth = 0.2) +
+  scale_x_log10() +
+  labs(x = "Pykälien lukumäärä (log-asteikko)", y = "Säädösten lukumäärä") +
+  theme_minimal(base_size = 11)
+```
+
+# 9. Uusien säädösten ennuste 2025–2030
+
+Edellä on tarkasteltu mennyttä kehitystä. Tilastollisen mallin arvo punnitaan kuitenkin sen kyvyssä ennustaa. Ennustaminen edellyttää, että ennustettavassa suureessa on aitoa rakennetta — trendiä tai ajallista riippuvuutta. Säädösten vuosittainen kokonaismäärä ei sellaista sisällä: peräkkäisten vuosien välinen korrelaatio on käytännössä nolla, joten kokonaismäärä on vuositasolla satunnaiskohinaa, jota ei voi ennustaa mielekkäästi. Tämä on itsessään tulos — kokonaisvolyymi heittelee vuodesta toiseen ilman ennustettavaa kaavaa.
+
+Uusien säädösten määrä on kuitenkin aivan toisenlainen suure. Sen peräkkäisten vuosien välinen korrelaatio on korkea (`r ac_uudet`), ja sillä on selvä laskeva trendi: uusia lakeja ja asetuksia säädetään vuosi vuodelta vähemmän. Vuonna 2024 uusia säädöksiä annettiin `r fmt(uudet_2024)`, kun 2010-luvun alussa luku oli yli viidensadan. Tämä on aidosti ennustettava ilmiö.
+
+Mallinnetaan uusien säädösten määrä bayesilaisella lineaarisella trendimallilla logaritmisella asteikolla. Malli sovitetaan vuoden 2000 jälkeiseen aineistoon, jolla trendi on vakaa, ja parametrien epävarmuus huomioidaan simuloimalla posterioriennuste. Mallin mukaan uusien säädösten määrä vähenee noin `r abs(vuosimuutos_pct)` prosenttia vuodessa.
+
+Ennusteen mukaan vuonna 2030 uusia säädöksiä annetaan todennäköisimmin `r fmt(ennuste_2030_med)`, ja 95 prosentin ennusteväli on `r fmt(ennuste_2030_lo)`–`r fmt(ennuste_2030_hi)`. Toisin kuin kokonaismäärän kohdalla, tässä ennusteväli on kapea suhteessa tasoon, koska sarjassa on aitoa rakennetta. Ennuste kertoo jotain, mitä pelkkä silmämääräinen tarkastelu ei paljasta: uuden lainsäädännön tuottaminen on hidastumassa systemaattisesti, ja jos kehitys jatkuu, 2020-luvun lopulla uusia säädöksiä annetaan selvästi vähemmän kuin vuosikymmenen alussa.
+
+Havainto on myös sisällöllisesti merkittävä. Se vahvistaa läpi artikkelin toistuvaa teemaa: lainsäädäntötyö siirtyy yhä enemmän uuden luomisesta olemassa olevan muokkaamiseen. Muutossäädösten määrä pysyy korkeana samalla kun uusien säädösten määrä laskee.
+
+```{r kuvio11, fig.cap="Kuvio 11. Uusien säädösten määrän toteuma 2000–2024 ja bayesilainen trendiennuste 2025–2030. Tummempi alue on 80 %:n ja vaaleampi 95 %:n ennusteväli.", fig.width=6.5, fig.height=4}
+toteuma <- uudet_ts |> filter(vuosi >= 2000) |> rename(maara = n)
 
 ggplot() +
-  # 95 % ennusteväli
   geom_ribbon(data = ennuste_yhteenveto,
               aes(x = vuosi, ymin = lo95, ymax = hi95),
               fill = "#457b9d", alpha = 0.20) +
-  # 80 % ennusteväli
   geom_ribbon(data = ennuste_yhteenveto,
               aes(x = vuosi, ymin = lo80, ymax = hi80),
               fill = "#457b9d", alpha = 0.35) +
-  # Toteuma
   geom_line(data = toteuma, aes(x = vuosi, y = maara),
             color = "#1d3557", linewidth = 0.9) +
   geom_point(data = toteuma, aes(x = vuosi, y = maara),
              color = "#1d3557", size = 1.5) +
-  # Ennusteen mediaani
   geom_line(data = ennuste_yhteenveto, aes(x = vuosi, y = mediaani),
             color = "#e63946", linewidth = 0.9, linetype = "dashed") +
   geom_point(data = ennuste_yhteenveto, aes(x = vuosi, y = mediaani),
@@ -514,11 +606,11 @@ ggplot() +
              color = "#888", linewidth = 0.6) +
   annotate("text", x = VUOSI_LOP + 0.7, y = max(toteuma$maara),
            label = "Ennuste →", hjust = 0, color = "#888", size = 3.2) +
-  labs(x = "Vuosi", y = "Säädösten lukumäärä") +
+  labs(x = "Vuosi", y = "Uusien säädösten lukumäärä") +
   theme_minimal(base_size = 11)
 ```
 
-# 9. Päätelmät
+# 10. Päätelmät
 
 Tässä artikkelissa on osoitettu kaksi mitattavaa murrosta Suomen lainsäädäntöhistoriassa. EU-jäsenyys vuonna 1995 kasvatti muutossäädösten suhteellista osuutta pysyvästi — bayesilainen analyysi paikantaa rakenteellisen muutoksen vuoteen `r vuosi_map` yhden vuoden tarkkuudella, ja muutossäädösten osuus kasvoi pysyvästi noin `r round((ratio_jalkeen_map / ratio_ennen_map - 1) * 100)` prosenttia. Finanssikriisi vuonna 2009 näkyi muutossäädösten poikkeuksellisena piikkinä, mikä kuvaa kriisilainsäädännön luonnetta: kiireessä muutetaan olemassa olevaa, ei rakenneta uutta.
 
@@ -526,11 +618,13 @@ Lisäksi osoitettiin, että lakien muutospaine jakautuu erittäin epätasaisesti
 
 Muutosten ajoittumisen analyysi paljasti, että lait muuttuvat nopeasti: ensimmäisen muutoksen mediaaniviive on vain `r eka_mediaani` vuotta ja `r eka_pct_2v` prosenttia laeista muutetaan kahden vuoden sisällä säätämisestä. Kun lakia kerran muutetaan, peräkkäisten muutosten mediaaniväli on vain `r vali_mediaani` vuosi. Laki ei siis ole vakaa normi vaan jatkuvan muokkauksen kohde.
 
-Lisäksi esitettiin bayesilainen ennuste, jonka mukaan säädösvolyymi pysyy lähivuosina vakaana noin `r fmt(volyymi_ka)` säädöksen vuositasolla, joskin yksittäisen vuoden ennusteväli on leveä. Ennusteen arvo ei ole sen tarkkuudessa vaan siinä, että se kuvaa epävarmuuden rehellisesti — toisin kuin piste-ennuste, joka antaisi vääränlaisen vaikutelman varmuudesta.
+Säädösten muotoa koskeva tarkastelu toi esiin kolme rakenteellista piirrettä. Säädösten antaminen keskittyy voimakkaasti joulukuuhun, jolloin annetaan `r kk_joulu_pct` prosenttia koko vuoden säädöksistä — seuraus voimaantulojen ajoittumisesta vuodenvaihteeseen. Merkittävä osa normistosta syntyy lakien sijaan asetuksin ja päätöksin. Säädösten pituus on voimakkaasti vino: mediaanisäädös on vain `r pituus_mediaani` pykälää, mutta pisin sisältää `r fmt(pituus_max)`. Tämä tarkoittaa, että säädösten lukumäärä antaa vain karkean kuvan sääntelyn todellisesta laajuudesta.
+
+Lisäksi osoitettiin, että vaikka säädösten vuosittaista kokonaismäärää ei voi ennustaa — se on satunnaiskohinaa ilman ajallista rakennetta — uusien säädösten määrä on aidosti ennustettava ja laskeva. Bayesilainen trendimalli ennustaa uusien säädösten määrän vähenevän noin `r abs(vuosimuutos_pct)` prosenttia vuodessa, mikä tarkoittaisi vuonna 2030 noin `r fmt(ennuste_2030_med)` uutta säädöstä. Ennusteen arvo on siinä, että se erottaa ennustettavan rakenteen ennustamattomasta kohinasta ja kuvaa epävarmuuden rehellisesti.
 
 Nämä havainnot eivät ole oikeudellisesti yllättäviä — EU-jäsenyyden ja finanssikriisin merkitys on tiedossa. Se mikä on uutta, on täsmällisyys: nyt voidaan sanoa numeroin, kuinka suuri muutos oli, milloin se alkoi ja kuinka kauan se kesti. Data ulottuu vuoteen 2024, joten kysymys ei ole oikeushistoriasta vaan nykyisestä lainsäädäntötodellisuudesta.
 
-Jatkotutkimukselle on useita luontevia suuntia. Asiakirjatyyppien (laki, asetus, valtioneuvoston asetus) kehityksen analyysi valottaisi, onko säätely siirtynyt eduskuntalaeista alemmanasteiseen normistoon. Lakien viittausverkoston analyysi paljastaisi ns. solmulait, joihin koko normisto nojaa. EU-direktiivien implementointiaikataulujen yhdistäminen Finlexin dataan mahdollistaisi sen arvioimisen, kuinka nopeasti eri hallinnonaloilla direktiivit muutetaan kansalliseksi lainsäädännöksi.
+Jatkotutkimukselle on useita luontevia suuntia. Säädöstyyppien ajallinen kehitys — onko sääntely siirtynyt eduskuntalaeista alemmanasteisiin asetuksiin ja päätöksiin — olisi luontevaa tutkia tässä esitellyn säädösluokittelun pohjalta. Lakien viittausverkoston analyysi paljastaisi ns. solmulait, joihin koko normisto nojaa. EU-direktiivien implementointiaikataulujen yhdistäminen Finlexin dataan mahdollistaisi sen arvioimisen, kuinka nopeasti eri hallinnonaloilla direktiivit muutetaan kansalliseksi lainsäädännöksi. Myös säädösten pituuden kehitys ajassa sekä uusien ja muuttavien säädösten erillinen ennustaminen ovat luontevia jatkoaiheita.
 
 Aineistolähtöinen lähestymistapa lainsäädäntöön ei korvaa oikeudellista tulkintaa. Se tarjoaa kuitenkin jotain, mitä perinteinen lainoppi ei pysty tuottamaan: systemaattisen kuvan siitä, miten lainsäädäntö kokonaisuutena kehittyy. Juristi, joka osaa lukea myös näitä kuvaajia, ymmärtää oikeudellisen ympäristönsä paremmin kuin se, joka lukee vain yksittäisiä lakeja.
 
